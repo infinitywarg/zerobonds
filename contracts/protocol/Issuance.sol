@@ -1,49 +1,53 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0
 pragma solidity ^0.8.9;
+
+import "../libraries/BondPricing.sol";
+import "../interfaces/IZerobondToken.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract Issuance {
     struct Auction {
-        uint256 amount;
-        uint96 issueStart;
-        uint96 issueEnd;
-        uint32 minYield;
-        uint32 maxYield;
+        uint256 totalAmount;
+        uint256 unsoldAmount;
+        uint256 issueStart;
+        uint256 issueEnd;
+        uint256 minYield;
+        uint256 maxYield;
         uint256 slope;
     }
 
-    uint96 private constant AUCTION_DURATION = 604800;
-    uint96 private constant SECONDS_IN_DAY = 86400;
-    uint96 private constant SECONDS_IN_YEAR = 31536000;
-    uint96 private constant EPOCH_TIME_INIT = 1667347199;
+    uint256 private constant AUCTION_DURATION = 604800;
+    uint256 private constant SECONDS_IN_DAY = 86400;
+    uint256 private constant EPOCH_TIME_INIT = 1667347199;
     uint256 private constant MATURITY_BITSHIFT = 160;
     uint256 private constant MATURITY_BITMASK = 2**96 - 1;
     uint256 private constant ISSUER_BITMASK = 2**160 - 1;
-    uint32 private constant YIELD_RANGE_MIN = 1;
-    uint32 private constant YIELD_RANGE_MAX = 9999;
+    uint256 private constant YIELD_RANGE_MIN = 1e16;
+    uint256 private constant YIELD_RANGE_MAX = 9999 * 1e14;
+
+    IZerobondToken private immutable zerobond;
+    IERC20 private immutable cash;
+
+    constructor(address zerobondToken, address cashToken) {
+        zerobond = IZerobondToken(zerobondToken);
+        cash = IERC20(cashToken);
+    }
 
     mapping(uint256 => Auction) public auctions;
 
-    function getBondPrice(uint96 maturity, uint32 yield) public view returns (uint256 price) {
-        uint256 ytm = ((maturity - block.timestamp) * 1e18) / 31536000;
-    }
-
-    function getRiskFreeYield() public pure returns (uint32 yield) {
+    function getRiskFreeYield() public pure returns (uint256 yield) {
         return 200;
     }
 
-    function getAuctionData(uint256 tokenId) public view returns (uint32 yield, uint256 price) {
-        require(auctions[tokenId].issueEnd >= block.timestamp, "Auction Finished");
-    }
-
-    function getTokenId(uint96 maturity, address issuer) public pure returns (uint256) {
+    function getTokenId(uint256 maturity, address issuer) public pure returns (uint256) {
         require((maturity - EPOCH_TIME_INIT) % SECONDS_IN_DAY == 0, "Invalid Maturity");
         require(issuer != address(0), "Zero Address");
-        uint256 id = (uint256(maturity) << MATURITY_BITSHIFT) | uint256(uint160(issuer));
+        uint256 id = (maturity << MATURITY_BITSHIFT) | uint256(uint160(issuer));
         return id;
     }
 
-    function getTokenData(uint256 id) public pure returns (uint96, address) {
-        uint96 maturity = uint96((id & (MATURITY_BITMASK << MATURITY_BITSHIFT)) >> MATURITY_BITSHIFT);
+    function getTokenData(uint256 id) public pure returns (uint256, address) {
+        uint256 maturity = (id & (MATURITY_BITMASK << MATURITY_BITSHIFT)) >> MATURITY_BITSHIFT;
         require((maturity - EPOCH_TIME_INIT) % SECONDS_IN_DAY == 0, "Invalid Maturity");
         address issuer = address(uint160(id & ISSUER_BITMASK));
         return (maturity, issuer);
@@ -51,25 +55,27 @@ contract Issuance {
 
     function previewIssue(
         uint256 amount,
-        uint8 term,
-        uint32 maxYield
+        uint256 term,
+        uint256 maxYield
     )
         public
         view
         returns (
-            uint96 issueStart,
-            uint96 issueEnd,
-            uint96 maturity,
-            uint32 minYield,
+            uint256 issueStart,
+            uint256 issueEnd,
+            uint256 maturity,
+            uint256 minYield,
             uint256 slope,
-            uint256 tokenId
+            uint256 tokenId,
+            uint256 minPrice,
+            uint256 maxPrice
         )
     {
-        require(amount >= 1e6, "Zero Amount");
-        require(term == 14 || term == 28 || term == 56 || term == 91, "Invalid Term");
+        require(amount >= 1e18, "Zero Amount");
+        require(term == 7 || term == 14 || term == 28 || term == 56, "Invalid Term");
         require(maxYield >= YIELD_RANGE_MIN && maxYield <= YIELD_RANGE_MAX, "Yield out of Range");
 
-        issueStart = uint96(block.timestamp);
+        issueStart = block.timestamp;
         issueEnd =
             issueStart +
             AUCTION_DURATION +
@@ -78,24 +84,53 @@ contract Issuance {
             1;
         maturity = issueEnd + (term * SECONDS_IN_DAY);
         minYield = getRiskFreeYield();
-        slope = ((maxYield - minYield) * 1e6) / AUCTION_DURATION;
+        slope = BondPricing.getSlope(minYield, maxYield);
         tokenId = getTokenId(maturity, msg.sender);
+        minPrice = BondPricing.getIssuePrice(minYield, term);
+        maxPrice = BondPricing.getIssuePrice(maxYield, term);
     }
 
     function issue(
         uint256 amount,
-        uint8 term,
-        uint32 maxYield
+        uint256 term,
+        uint256 maxYield
     ) external {
-        (uint96 issueStart, uint96 issueEnd, , uint32 minYield, uint256 slope, uint256 tokenId) = previewIssue(
+        (uint256 issueStart, uint256 issueEnd, , uint256 minYield, uint256 slope, uint256 tokenId, , ) = previewIssue(
             amount,
             term,
             maxYield
         );
 
-        Auction memory auction = Auction(amount, issueStart, issueEnd, minYield, maxYield, slope);
+        Auction memory auction = Auction(amount, amount, issueStart, issueEnd, minYield, maxYield, slope);
         auctions[tokenId] = auction;
+        zerobond.mint(address(this), tokenId, amount, "");
     }
 
-    function claim() external {}
+    function previewBuy(uint256 tokenId, uint256 amount)
+        public
+        view
+        returns (
+            uint256 yield,
+            uint256 price,
+            uint256 cashAmount
+        )
+    {
+        require(auctions[tokenId].unsoldAmount >= amount, "Amount not available");
+        require(auctions[tokenId].issueEnd >= block.timestamp, "Auction Finished");
+        require(auctions[tokenId].issueStart <= block.timestamp, "Auction not Started");
+        yield = BondPricing.getYield(auctions[tokenId].issueStart, auctions[tokenId].slope);
+        (uint256 maturity, ) = getTokenData(tokenId);
+        price = BondPricing.getPrice(yield, maturity);
+        cashAmount = BondPricing.getCashAmount(amount, price);
+    }
+
+    function buy(uint256 tokenId, uint256 amount) external {
+        (, , uint256 cashAmount) = previewBuy(tokenId, amount);
+        (, address issuer) = getTokenData(tokenId);
+        auctions[tokenId].unsoldAmount -= amount;
+        zerobond.safeTransferFrom(address(this), msg.sender, tokenId, amount, "");
+        cash.transferFrom(msg.sender, issuer, cashAmount);
+    }
+
+    function redeem(uint256 tokenId, uint256 amount) external {}
 }
