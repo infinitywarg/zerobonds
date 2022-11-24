@@ -14,12 +14,12 @@ library BondPricing {
     uint256 private constant TTM_28_DAYS = 1;
     uint256 private constant TTM_56_DAYS = 1;
 
-    function getPrice(uint256 yield, uint256 maturity) public view returns (uint256 price) {
+    function getPrice(uint256 yield, uint256 maturity) internal view returns (uint256 price) {
         uint256 t = ((maturity - block.timestamp) * ONE).div(SECONDS_IN_YEAR * ONE);
         price = ((ONE + yield).pow(t)).inv();
     }
 
-    function getIssuePrice(uint256 yield, uint256 term) public pure returns (uint256 price) {
+    function getIssuePrice(uint256 yield, uint256 term) internal pure returns (uint256 price) {
         uint256 t;
         if (term == 7) {
             t = TTM_07_DAYS;
@@ -33,15 +33,15 @@ library BondPricing {
         price = ((ONE + yield).pow(t)).inv();
     }
 
-    function getSlope(uint256 minYield, uint256 maxYield) public pure returns (uint256 slope) {
+    function getSlope(uint256 minYield, uint256 maxYield) internal pure returns (uint256 slope) {
         slope = ((maxYield - minYield) * ONE).div(SECONDS_IN_WEEK * ONE);
     }
 
-    function getYield(uint256 issueStart, uint256 slope) public view returns (uint256 yield) {
+    function getYield(uint256 issueStart, uint256 slope) internal view returns (uint256 yield) {
         yield = ((block.timestamp - issueStart) * ONE).mul(slope);
     }
 
-    function getCashAmount(uint256 amount, uint256 price) public pure returns (uint256 cashAmount) {
+    function getCashAmount(uint256 amount, uint256 price) internal pure returns (uint256 cashAmount) {
         cashAmount = amount.mul(price);
     }
 }

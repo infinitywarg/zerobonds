@@ -16,7 +16,7 @@ contract Issuance {
         uint256 slope;
     }
 
-    uint256 private constant AUCTION_DURATION = 604800;
+    uint256 private constant SECONDS_IN_WEEK = 604800;
     uint256 private constant SECONDS_IN_DAY = 86400;
     uint256 private constant EPOCH_TIME_INIT = 1667347199;
     uint256 private constant MATURITY_BITSHIFT = 160;
@@ -28,12 +28,14 @@ contract Issuance {
     IZerobondToken private immutable zerobond;
     IERC20 private immutable cash;
 
+    mapping(uint256 => Auction) public auctions;
+    mapping(uint256 => uint256) public claimedAmount;
+    mapping(uint256 => uint256) public repaidAmount;
+
     constructor(address zerobondToken, address cashToken) {
         zerobond = IZerobondToken(zerobondToken);
         cash = IERC20(cashToken);
     }
-
-    mapping(uint256 => Auction) public auctions;
 
     function getRiskFreeYield() public pure returns (uint256 yield) {
         return 200;
@@ -78,9 +80,9 @@ contract Issuance {
         issueStart = block.timestamp;
         issueEnd =
             issueStart +
-            AUCTION_DURATION +
+            SECONDS_IN_WEEK +
             SECONDS_IN_DAY -
-            ((issueStart + AUCTION_DURATION) % SECONDS_IN_DAY) -
+            ((issueStart + SECONDS_IN_WEEK) % SECONDS_IN_DAY) -
             1;
         maturity = issueEnd + (term * SECONDS_IN_DAY);
         minYield = getRiskFreeYield();
@@ -106,7 +108,20 @@ contract Issuance {
         zerobond.mint(address(this), tokenId, amount, "");
     }
 
-    function previewBuy(uint256 tokenId, uint256 amount)
+    function repay(uint256 tokenId, uint256 amount) external {
+        (uint256 maturity, address issuer) = getTokenData(tokenId);
+        require(msg.sender == issuer, "not issuer");
+        require(
+            (maturity > block.timestamp && maturity - block.timestamp <= (SECONDS_IN_WEEK / 2)) ||
+                (maturity <= block.timestamp && block.timestamp - maturity <= (SECONDS_IN_WEEK / 2)),
+            "repay too early/late"
+        );
+
+        repaidAmount[tokenId] += amount;
+        cash.transferFrom(msg.sender, address(this), amount);
+    }
+
+    function previewClaim(uint256 tokenId, uint256 amount)
         public
         view
         returns (
@@ -124,13 +139,17 @@ contract Issuance {
         cashAmount = BondPricing.getCashAmount(amount, price);
     }
 
-    function buy(uint256 tokenId, uint256 amount) external {
-        (, , uint256 cashAmount) = previewBuy(tokenId, amount);
+    function claim(uint256 tokenId, uint256 amount) external {
+        (, , uint256 cashAmount) = previewClaim(tokenId, amount);
         (, address issuer) = getTokenData(tokenId);
         auctions[tokenId].unsoldAmount -= amount;
+        claimedAmount[tokenId] += amount;
         zerobond.safeTransferFrom(address(this), msg.sender, tokenId, amount, "");
         cash.transferFrom(msg.sender, issuer, cashAmount);
     }
 
-    function redeem(uint256 tokenId, uint256 amount) external {}
+    function redeem(uint256 tokenId, uint256 amount) external {
+        (uint256 maturity, address issuer) = getTokenData(tokenId);
+        zerobond.burn(msg.sender, tokenId, amount);
+    }
 }
